@@ -109,6 +109,7 @@ import { useProjectNotificationPreferences } from "../hooks/useProjectNotificati
 import { useNotificationProjects } from "../hooks/useNotificationProjects";
 import { updateNotificationPreferences } from "../lib/notificationPreferences";
 import type { ExplorerMenuItem } from "./ExplorerMenu";
+import { GithubStarPrompt } from "./GithubStarPrompt";
 
 const REVEAL_LABEL = IS_MAC
   ? "Reveal in Finder"
@@ -838,6 +839,7 @@ export function ProjectRail({
             onDismissUpdate={onDismissUpdate}
           />
           <div className="flex shrink-0 flex-col gap-px p-2">
+            <GithubStarPrompt />
             <RailAction
               label="Settings"
               icon={Settings}
