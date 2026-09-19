@@ -401,7 +401,7 @@ export function CwdPicker({
                     : "text-content/80 hover:bg-content/5"
                 }`}
               >
-                <span className="text-[13px]">Connect to server…</span>
+                <span className="text-[13px]">Open remote folder…</span>
                 <ServerIcon className="size-3.5 shrink-0 text-content/45" aria-hidden />
               </button>
             </div>

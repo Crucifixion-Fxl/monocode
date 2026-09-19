@@ -13,6 +13,72 @@ const field = "h-9 w-full rounded-md border border-content/15 bg-background-base
 const button = "flex h-8 items-center justify-center gap-1.5 rounded-md border border-content/10 px-2.5 text-[12px] text-content/70 hover:bg-content/10 disabled:opacity-40";
 const parent = (path: string) => path.replace(/\/+$/, "").replace(/\/[^/]*$/, "") || "/";
 const join = (path: string, name: string) => `${path.replace(/\/+$/, "")}/${name}`;
+const CONTAINER_USAGE_KEY = "monocode.remoteContainerUsage";
+
+function containerUsageKey(profile: ConnectionProfile, container: string): string {
+  return `${profile.host}\u0000${profile.user ?? ""}\u0000${profile.port ?? ""}\u0000${container}`;
+}
+
+function readContainerUsage(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(CONTAINER_USAGE_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : null;
+    if (!parsed || typeof parsed !== "object") return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter(([, value]) => typeof value === "number" && Number.isFinite(value)),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function rememberContainerUse(profile: ConnectionProfile): void {
+  if (!profile.container) return;
+  try {
+    const usage = readContainerUsage();
+    const key = containerUsageKey(profile, profile.container);
+    usage[key] = (usage[key] ?? 0) + 1;
+    localStorage.setItem(CONTAINER_USAGE_KEY, JSON.stringify(usage));
+  } catch {
+    // private mode / unavailable storage
+  }
+}
+
+function preferredContainer(
+  server: ConnectionProfile,
+  profiles: ConnectionProfile[],
+  containers: RemoteContainer[] = [],
+): string {
+  const usage = readContainerUsage();
+  const counts = new Map<string, number>();
+  const recency = new Map<string, number>();
+  const add = (container: string, amount: number) => {
+    if (container) counts.set(container, (counts.get(container) ?? 0) + amount);
+  };
+
+  for (const profile of profiles) {
+    if (sameServer(profile, server) && profile.container) {
+      add(profile.container, 1);
+      add(profile.container, usage[containerUsageKey(server, profile.container)] ?? 0);
+    }
+  }
+  for (const [index, item] of loadRecents().entries()) {
+    const parsed = parseRemotePath(item.path);
+    const profile = parsed && profiles.find((candidate) => candidate.id === parsed.connectionId);
+    if (profile && sameServer(profile, server) && profile.container) {
+      add(profile.container, 1);
+      if (!recency.has(profile.container)) recency.set(profile.container, index);
+    }
+  }
+
+  const names = [...new Set([...counts.keys(), ...containers.map((container) => container.name)])];
+  names.sort((a, b) => {
+    const count = (counts.get(b) ?? 0) - (counts.get(a) ?? 0);
+    if (count !== 0) return count;
+    return (recency.get(a) ?? Number.MAX_SAFE_INTEGER) - (recency.get(b) ?? Number.MAX_SAFE_INTEGER);
+  });
+  return names[0] ?? "";
+}
 
 export function ConnectDialog({ onConnect, onClose }: {
   onConnect: (uri: string) => void; onClose: () => void;
@@ -30,8 +96,8 @@ export function ConnectDialog({ onConnect, onClose }: {
   const [containersLoading, setContainersLoading] = useState(false);
   const [containerError, setContainerError] = useState("");
   const [reloadContainers, setReloadContainers] = useState(0);
-  const [location, setLocation] = useState("");
-  const [pathInput, setPathInput] = useState("");
+  const [location, setLocation] = useState("/");
+  const [pathInput, setPathInput] = useState("/");
   const [listing, setListing] = useState<RemoteDirectoryListing | null>(null);
   const [listingLoading, setListingLoading] = useState(false);
   const [directoryError, setDirectoryError] = useState("");
@@ -41,6 +107,7 @@ export function ConnectDialog({ onConnect, onClose }: {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const generation = useRef(0);
+  const defaultedServer = useRef("");
 
   useEffect(() => {
     let active = true;
@@ -59,7 +126,7 @@ export function ConnectDialog({ onConnect, onClose }: {
     for (const profile of profiles) {
       if (!rows.some(row => sameServer(row.profile, profile))) {
         const destination = `${profile.user ? `${profile.user}@` : ""}${profile.host}${profile.port ? `:${profile.port}` : ""}`;
-        rows.push({ key: profile.id, label: `${destination} · Saved`, profile });
+        rows.push({ key: profile.id, label: destination, profile });
       }
     }
     for (const alias of aliases) {
@@ -76,9 +143,11 @@ export function ConnectDialog({ onConnect, onClose }: {
     if (!serverKey && !serversLoading) {
       const first = servers[0];
       setServerKey(first?.key ?? "manual");
-      setContainer(first?.profile.container ?? "");
+      const nextContainer = first ? preferredContainer(first.profile, profiles) : "";
+      setContainer(nextContainer);
+      defaultedServer.current = nextContainer ? first?.key ?? "" : "";
     }
-  }, [servers, serverKey, serversLoading]);
+  }, [profiles, servers, serverKey, serversLoading]);
 
   const server = useMemo(() => serverKey === "manual"
     ? { ...blankConnectionProfile(), host: manualHost.trim(), user: manualUser.trim() || null, port: manualPort ? Number(manualPort) : null }
@@ -101,6 +170,16 @@ export function ConnectDialog({ onConnect, onClose }: {
     return () => { active = false; clearTimeout(timer); };
   }, [server, validServer, reloadContainers, serverKey]);
 
+  // Docker discovery is asynchronous. Once it arrives, fill an otherwise
+  // empty environment with the most-used container for this server.
+  useEffect(() => {
+    if (!server || !validServer || containers.length === 0 || defaultedServer.current === serverKey) return;
+    const nextContainer = preferredContainer(server, profiles, containers);
+    if (!nextContainer) return;
+    setContainer(nextContainer);
+    defaultedServer.current = serverKey;
+  }, [containers, profiles, server, serverKey, validServer]);
+
   useEffect(() => {
     let active = true;
     setListing(null); setDirectoryError(""); setSaveError("");
@@ -117,7 +196,7 @@ export function ConnectDialog({ onConnect, onClose }: {
   }, [target, validServer, location, reloadDirectory, serverKey]);
 
   const resetDirectory = () => {
-    generation.current++; setListing(null); setLocation(""); setPathInput(""); setFolderFilter(""); setSaveError("");
+    generation.current++; setListing(null); setLocation("/"); setPathInput("/"); setFolderFilter(""); setSaveError("");
   };
   const navigate = (path: string) => {
     generation.current++; setListing(null); setLocation(path); setPathInput(path); setFolderFilter(""); setReloadDirectory(n => n + 1);
@@ -140,18 +219,26 @@ export function ConnectDialog({ onConnect, onClose }: {
         profile = await saveConnection({ ...target, id: "", name: "", createdAt: 0 });
         await refreshConnections();
       }
-      if (generation.current === epoch) onConnect(remoteProjectUri(profile.id, chosenPath));
+      if (generation.current === epoch) {
+        rememberContainerUse(target);
+        onConnect(remoteProjectUri(profile.id, chosenPath));
+      }
     } catch (error) { if (generation.current === epoch) setSaveError(String(error)); }
     finally { setSaving(false); }
   };
 
-  return <Modal title="Open remote project" size="md" onClose={onClose} className="max-h-[80vh]">
+  return <Modal title="Open remote folder" size="md" onClose={onClose} className="max-h-[80vh]">
     <div className="flex flex-col gap-4 p-4">
       <fieldset disabled={saving} className="flex min-w-0 flex-col gap-4 disabled:opacity-60">
         <label className="flex flex-col gap-1.5 text-[12px] text-content/70">
           <span>1 · Server</span>
           <select aria-label="Server" className={field} value={serverKey} disabled={serversLoading} onChange={e => {
-            resetDirectory(); setServerKey(e.target.value); setContainer(servers.find(row => row.key === e.target.value)?.profile.container ?? "");
+            resetDirectory();
+            const row = servers.find(row => row.key === e.target.value);
+            const nextContainer = row ? preferredContainer(row.profile, profiles) : "";
+            setServerKey(e.target.value);
+            setContainer(nextContainer);
+            defaultedServer.current = nextContainer ? e.target.value : "";
           }}>
             <option value="" disabled>{serversLoading ? "Reading servers…" : "Choose a server"}</option>
             {servers.map(row => <option key={row.key} value={row.key}>{row.label}</option>)}

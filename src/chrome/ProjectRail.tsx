@@ -1204,7 +1204,7 @@ function ProjectSectionHeader({
             }}
           >
             <ServerIcon className="size-3.5 shrink-0 text-content/45" aria-hidden />
-            Connect to server…
+            Open remote folder…
           </button>
         </Popover>
       ) : null}
