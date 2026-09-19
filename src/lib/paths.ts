@@ -28,15 +28,16 @@ export function prettyCwd(cwd: string): string {
   if (trimmed === "~") return "~";
 
   if (isRemotePath(trimmed)) {
-    // `ssh://<id>/home/u/app` → `Server Name:~/app`
-    const parsed = parseRemotePath(trimmed);
+    // `ssh://<id>/home/u/app` → `Server Name:~/app`. Parse the original cwd:
+    // the remote root `ssh://<id>/` needs its slash to carry a path at all.
+    const parsed = parseRemotePath(cwd);
     if (!parsed) return trimmed;
     const parts = parsed.path.split("/").filter(Boolean);
     if (parts.length >= 2 && (parts[0] === "Users" || parts[0] === "home")) {
       const rest = parts.slice(2).join("/");
-      return `${remoteConnectionLabel(trimmed)}:~${rest ? `/${rest}` : ""}`;
+      return `${remoteConnectionLabel(cwd)}:~${rest ? `/${rest}` : ""}`;
     }
-    return `${remoteConnectionLabel(trimmed)}:${parsed.path}`;
+    return `${remoteConnectionLabel(cwd)}:${parsed.path}`;
   }
 
   const parts = trimmed.split("/").filter(Boolean);

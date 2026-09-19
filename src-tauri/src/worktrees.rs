@@ -892,7 +892,19 @@ pub(crate) fn reconcile_removals(conn: &rusqlite::Connection) -> Result<(), Stri
                     serde_json::from_str::<Vec<SessionBeforeRemoval>>(&json)
                         .map_err(|e| e.to_string())?
                 }
-                _ => Vec::new(),
+                // Exit 255 is ssh itself (auth, DNS, unreachable) — the
+                // remote state is unknown, not "link gone". Keep the journal
+                // row so the next startup retries the check instead of
+                // stranding sessions that a reachable server would restore.
+                Ok(output) if output.code == Some(255) => {
+                    eprintln!("Worktree recovery for {path} deferred: remote server unreachable.");
+                    continue;
+                }
+                Ok(_) => Vec::new(),
+                Err(error) => {
+                    eprintln!("Worktree recovery for {path} deferred: {error}");
+                    continue;
+                }
             }
         } else if Path::new(&path)
             .join(".git")
@@ -945,23 +957,29 @@ fn remove_with_sessions(
 }
 
 fn remove_remote_with_sessions(
-    conn: &rusqlite::Connection,
+    store: &SessionStore,
     root: &crate::remote::RemoteRef,
     path: &str,
     force: bool,
     keep_sessions: bool,
 ) -> Result<WorktreeRemoval, String> {
+    // Each ssh round trip can take seconds; take the SQLite mutex only for
+    // the database phases so the rest of the app keeps working meanwhile.
     let tree = remote_removal_target(root, path)?;
     let worktrees = remote_list(root)?;
     let main = worktrees
         .iter()
         .find(|tree| tree.is_main)
         .ok_or("No main working copy found")?;
-    let ids = remote_session_ids(conn, path)?;
-    if !keep_sessions && !ids.is_empty() {
-        return Err("Sessions still use this worktree. Move or delete those sessions first (including archived sessions).".into());
-    }
-    let saved = prepare_removal(conn, path, &main.path, &ids)?;
+    let (ids, saved) = {
+        let conn = store.lock_conn()?;
+        let ids = remote_session_ids(&conn, path)?;
+        if !keep_sessions && !ids.is_empty() {
+            return Err("Sessions still use this worktree. Move or delete those sessions first (including archived sessions).".into());
+        }
+        let saved = prepare_removal(&conn, path, &main.path, &ids)?;
+        (ids, saved)
+    };
     let target = remote_raw_path(&tree.path)?;
     let mut args = vec!["worktree", "remove"];
     if force {
@@ -969,15 +987,19 @@ fn remove_remote_with_sessions(
     }
     args.extend(["--", target.path.as_str()]);
     if let Err(error) = remote_git(root, &args) {
-        finish_removal(conn, path, &saved).map_err(|restore| {
+        let conn = store.lock_conn()?;
+        finish_removal(&conn, path, &saved).map_err(|restore| {
             format!("{error}. Sessions remain detached until recovery on restart: {restore}")
         })?;
         return Err(error);
     }
-    if let Err(error) = finish_removal(conn, path, &[]) {
-        eprintln!(
-            "Remote worktree removed; recovery journal cleanup will retry on restart: {error}"
-        );
+    {
+        let conn = store.lock_conn()?;
+        if let Err(error) = finish_removal(&conn, path, &[]) {
+            eprintln!(
+                "Remote worktree removed; recovery journal cleanup will retry on restart: {error}"
+            );
+        }
     }
     Ok(WorktreeRemoval {
         session_ids: ids,
@@ -996,9 +1018,8 @@ pub fn git_worktree_remove(
     agents: State<'_, crate::harness::HarnessHost>,
 ) -> Result<WorktreeRemoval, String> {
     if let Some(remote) = crate::remote::parse_remote(&cwd) {
-        let conn = store.lock_conn()?;
         return remove_remote_with_sessions(
-            &conn,
+            store.inner(),
             &remote,
             &path,
             force,

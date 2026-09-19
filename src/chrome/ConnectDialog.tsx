@@ -247,9 +247,9 @@ export function ConnectDialog({ onConnect, onClose }: {
         </label>
         {discoveryError && <p role="alert" className="text-[12px] text-red-400">{discoveryError}</p>}
         {serverKey === "manual" && <div className="grid grid-cols-2 gap-2">
-          <input aria-label="Host or SSH alias" placeholder="Host or SSH alias" className={`${field} col-span-2`} value={manualHost} onChange={e => { resetDirectory(); setManualHost(e.target.value); }} />
-          <input aria-label="SSH user" placeholder="User (from SSH config)" className={field} value={manualUser} onChange={e => { resetDirectory(); setManualUser(e.target.value); }} />
-          <input aria-label="SSH port" placeholder="Port (from SSH config)" className={field} inputMode="numeric" value={manualPort} onChange={e => { resetDirectory(); setManualPort(e.target.value.replace(/\D/g, "")); }} />
+          <input aria-label="Host or SSH alias" placeholder="Host or SSH alias" className={`${field} col-span-2`} value={manualHost} onChange={e => { resetDirectory(); setManualHost(e.target.value); setContainer(""); defaultedServer.current = ""; }} />
+          <input aria-label="SSH user" placeholder="User (from SSH config)" className={field} value={manualUser} onChange={e => { resetDirectory(); setManualUser(e.target.value); setContainer(""); defaultedServer.current = ""; }} />
+          <input aria-label="SSH port" placeholder="Port (from SSH config)" className={field} inputMode="numeric" value={manualPort} onChange={e => { resetDirectory(); setManualPort(e.target.value.replace(/\D/g, "")); setContainer(""); defaultedServer.current = ""; }} />
         </div>}
         <div className="flex flex-col gap-1.5 text-[12px] text-content/70">
           <label htmlFor="remote-environment">2 · Environment</label>

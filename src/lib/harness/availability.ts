@@ -204,8 +204,10 @@ const remoteAvailability = new Map<string, RemoteAvailability>();
 const remoteInflight = new Map<string, Promise<void>>();
 const remoteProbedAt = new Map<string, number>();
 const remoteListeners = new Set<() => void>();
+let remoteVersion = 0;
 
 function emitRemote() {
+  remoteVersion += 1;
   for (const listener of remoteListeners) listener();
 }
 
@@ -219,8 +221,7 @@ export function subscribeRemoteHarnessAvailability(
 }
 
 export function getRemoteHarnessAvailabilitySnapshot(): number {
-  // A single version counter: cheap, and any connection change re-renders.
-  return remoteAvailability.size + remoteProbedAt.size;
+  return remoteVersion;
 }
 
 export function isRemoteHarnessAvailable(

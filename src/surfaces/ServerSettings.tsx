@@ -36,6 +36,8 @@ type Draft = {
   port: string;
   container: string;
   authNote: string;
+  /** Carried through on edits so `connections_save` keeps the stored value. */
+  createdAt: number;
 };
 
 function draftFrom(profile: ConnectionProfile): Draft {
@@ -47,6 +49,7 @@ function draftFrom(profile: ConnectionProfile): Draft {
     port: profile.port != null ? String(profile.port) : "",
     container: profile.container ?? "",
     authNote: profile.authNote ?? "",
+    createdAt: profile.createdAt,
   };
 }
 
@@ -60,7 +63,7 @@ function draftToProfile(draft: Draft): ConnectionProfile {
     port: Number.isFinite(port) && port > 0 && port < 65536 ? port : null,
     container: draft.container.trim() || null,
     authNote: draft.authNote.trim() || null,
-    createdAt: 0,
+    createdAt: draft.createdAt,
   };
 }
 
@@ -286,7 +289,13 @@ function ConnectionForm({
   const [error, setError] = useState<string | null>(null);
 
   const profile = draftToProfile(form);
-  const canSubmit = form.host.trim().length > 0 && busy === null;
+  const port = Number.parseInt(form.port, 10);
+  const portError =
+    form.port.length > 0 && (!Number.isFinite(port) || port < 1 || port > 65535)
+      ? "Port must be between 1 and 65535."
+      : null;
+  const canSubmit =
+    form.host.trim().length > 0 && portError === null && busy === null;
 
   const set = (patch: Partial<Draft>) => setForm((prev) => ({ ...prev, ...patch }));
 
@@ -335,7 +344,7 @@ function ConnectionForm({
             onChange={(user) => set({ user })}
           />
         </Field>
-        <Field label="Port">
+        <Field label="Port" error={portError}>
           <TextInput
             value={form.port}
             placeholder="22"
@@ -393,16 +402,19 @@ function ConnectionForm({
 function Field({
   label,
   hint,
+  error,
   children,
 }: {
   label: string;
   hint?: string;
+  error?: string | null;
   children: React.ReactNode;
 }) {
   return (
     <label className="flex min-w-0 flex-col gap-1.5">
       <span className="text-[12px] font-medium text-content/70">{label}</span>
       {children}
+      {error ? <span className="text-[11px] text-red-400">{error}</span> : null}
       {hint ? <span className="text-[11px] text-content/40">{hint}</span> : null}
     </label>
   );

@@ -4091,11 +4091,19 @@ pub fn create_path(parent: String, name: String, is_dir: bool) -> Result<String,
             connection_id: remote.connection_id.clone(),
             path: dest.clone(),
         };
-        if is_dir {
-            crate::remote::remote_create_dir(&dest_ref)?;
+        let label = file_label(Path::new(&dest), &name);
+        let created = if is_dir {
+            crate::remote::remote_create_dir(&dest_ref)
         } else {
-            // Empty file: the helper's write replaces-or-creates atomically.
-            crate::remote::remote_write(&dest_ref, b"")?;
+            // No-clobber create: an existing file is a collision, not a
+            // silent overwrite (same contract as the local branch).
+            crate::remote::remote_create_file(&dest_ref)
+        };
+        if let Err(error) = created {
+            if error.contains("already exists") {
+                return Err(already_exists(&label));
+            }
+            return Err(error);
         }
         return Ok(crate::remote::remote_uri(&remote.connection_id, &dest));
     }
@@ -4337,16 +4345,28 @@ pub fn stat_files(paths: Vec<String>) -> Result<Vec<FileMtime>, String> {
     if paths.len() > MAX_STAT_FILES {
         return Err("Too many paths".into());
     }
+    let stat_local = |path: String| {
+        let expanded = expand_home(&path);
+        let mtime_ms = std::fs::metadata(&expanded)
+            .ok()
+            .filter(|meta| meta.is_file())
+            .and_then(|meta| file_mtime_ms(&meta));
+        FileMtime { path, mtime_ms }
+    };
     if paths
         .iter()
         .any(|path| crate::remote::parse_remote(path).is_some())
     {
-        // One ssh round-trip per connection covers the whole batch.
+        // One ssh round-trip per connection covers the whole batch; local
+        // paths in the same batch still get their mtime locally.
         let mut grouped: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
+        let mut local_paths = Vec::new();
         for path in paths {
             if let Some(remote) = crate::remote::parse_remote(&path) {
                 grouped.entry(remote.connection_id).or_default().push(path);
+            } else {
+                local_paths.push(path);
             }
         }
         let mut out = Vec::new();
@@ -4355,19 +4375,10 @@ pub fn stat_files(paths: Vec<String>) -> Result<Vec<FileMtime>, String> {
                 out.extend(crate::remote::remote_stat_files(&remote, &group));
             }
         }
+        out.extend(local_paths.into_iter().map(stat_local));
         return Ok(out);
     }
-    Ok(paths
-        .into_iter()
-        .map(|path| {
-            let expanded = expand_home(&path);
-            let mtime_ms = std::fs::metadata(&expanded)
-                .ok()
-                .filter(|meta| meta.is_file())
-                .and_then(|meta| file_mtime_ms(&meta));
-            FileMtime { path, mtime_ms }
-        })
-        .collect())
+    Ok(paths.into_iter().map(stat_local).collect())
 }
 
 #[derive(Serialize)]
@@ -4812,7 +4823,12 @@ fn rename_path_sync(path: &str, name: &str) -> Result<String, String> {
             connection_id: remote.connection_id.clone(),
             path: dest_path.clone(),
         };
-        crate::remote::remote_rename(&remote, &dest)?;
+        if let Err(error) = crate::remote::remote_rename(&remote, &dest) {
+            if error.contains("already exists") {
+                return Err(already_exists(&file_label(Path::new(&dest_path), name)));
+            }
+            return Err(error);
+        }
         return Ok(crate::remote::remote_uri(&remote.connection_id, &dest_path));
     }
     rename_path_local(path, name)
@@ -4911,7 +4927,12 @@ fn move_path_sync(from: &str, dest_parent: &str) -> Result<String, String> {
             connection_id: remote_dest.connection_id.clone(),
             path: dest_path.clone(),
         };
-        crate::remote::remote_move(&remote_from, &dest)?;
+        if let Err(error) = crate::remote::remote_move(&remote_from, &dest) {
+            if error.contains("already exists") {
+                return Err(already_exists(&name));
+            }
+            return Err(error);
+        }
         return Ok(crate::remote::remote_uri(
             &remote_dest.connection_id,
             &dest_path,

@@ -102,30 +102,32 @@ function BootGate({ children }: { children: React.ReactNode }) {
 }
 
 whenTauriReady(() => {
-  try {
-    void listen<number>("quit_poll", (event) => {
-      void reportQuitPoll(event.payload);
+  // `listen` registers asynchronously; a rejected registration never reaches
+  // a synchronous `catch`, so each promise carries its own.
+  const wired = (promise: Promise<unknown>) =>
+    promise.catch((error: unknown) => {
+      showBootError(
+        `quit wiring failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
     });
-    // Scoped to this window on purpose: a global `listen` is registered as
-    // `Any`, which Tauri matches for every event regardless of the
-    // emitter's target, so one dialog would become one per window.
-    void getCurrentWebviewWindow().listen<{ id: number; inFlight: number }>(
-      "quit_confirm",
-      (event) => {
-        void askQuitConfirmation(event.payload.id, event.payload.inFlight);
-      },
-    );
-    void listen<number>("quit_commit", (event) => {
-      void commitQuit(event.payload);
-    });
-    void listen("quit_aborted", () => {
-      abortQuit();
-    });
-  } catch (error: unknown) {
-    showBootError(
-      `quit wiring failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+  wired(listen<number>("quit_poll", (event) => {
+    void reportQuitPoll(event.payload);
+  }));
+  // Scoped to this window on purpose: a global `listen` is registered as
+  // `Any`, which Tauri matches for every event regardless of the
+  // emitter's target, so one dialog would become one per window.
+  wired(getCurrentWebviewWindow().listen<{ id: number; inFlight: number }>(
+    "quit_confirm",
+    (event) => {
+      void askQuitConfirmation(event.payload.id, event.payload.inFlight);
+    },
+  ));
+  wired(listen<number>("quit_commit", (event) => {
+    void commitQuit(event.payload);
+  }));
+  wired(listen("quit_aborted", () => {
+    abortQuit();
+  }));
 });
 
 whenTauriReady(() => {

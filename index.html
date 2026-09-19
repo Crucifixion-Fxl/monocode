@@ -139,6 +139,9 @@
           }, 4000);
         });
         setTimeout(function () {
+          // React may mount before `window.load` when a slow resource delays
+          // it; a mounted app is not a module stall.
+          if (document.getElementById("root")?.childElementCount) return;
           mark(el && el.textContent.indexOf("dom-content") >= 0
             ? "js: scripts evaluating… (module stall)"
             : "js: no dom-content-loaded after 8s", "#f87171");

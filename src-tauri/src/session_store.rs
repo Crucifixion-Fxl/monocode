@@ -219,8 +219,11 @@ pub fn session_list_by_project(
     if cwd.trim().is_empty() {
         return Err("cwd is required".into());
     }
+    // Git discovery can hit ssh for remote projects; compute it before the
+    // SQLite mutex so a slow server cannot stall every other command.
+    let git = crate::fs::git_info_for(&crate::fs::expand_home(&cwd));
     let conn = store.conn.lock().map_err(|_| "Session store is locked")?;
-    list_by_project(&conn, &cwd).map_err(|e| e.to_string())
+    list_by_project(&conn, &cwd, &git).map_err(|e| e.to_string())
 }
 
 #[tauri::command(async)]
@@ -1232,8 +1235,11 @@ fn ceil_char_boundary(text: &str, mut index: usize) -> usize {
     index
 }
 
-fn list_by_project(conn: &Connection, cwd: &str) -> rusqlite::Result<Vec<SessionSummary>> {
-    let git = crate::fs::git_info_for(&crate::fs::expand_home(cwd));
+fn list_by_project(
+    conn: &Connection,
+    cwd: &str,
+    git: &crate::fs::GitInfo,
+) -> rusqlite::Result<Vec<SessionSummary>> {
     let mut statement = conn.prepare(
         "SELECT id, cwd, harness, model, runtime_mode, title, provider_session_id,
                 created_at, updated_at, branch, archived, pinned,
@@ -1632,6 +1638,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn git_for(cwd: &str) -> crate::fs::GitInfo {
+        crate::fs::git_info_for(&crate::fs::expand_home(cwd))
+    }
+
     fn sample(id: &str, cwd: &str, title: &str) -> SessionUpsert {
         SessionUpsert {
             id: id.into(),
@@ -1662,7 +1672,7 @@ mod tests {
         conn.execute("UPDATE sessions SET inbox_ask = '{}' WHERE id = 'ask'", [])
             .unwrap();
         migrate(&conn).unwrap();
-        let rows = list_by_project(&conn, "/tmp/project").unwrap();
+        let rows = list_by_project(&conn, "/tmp/project", &git_for("/tmp/project")).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, "project");
         assert!(get_session(&conn, "ask").unwrap().is_none());
@@ -1697,7 +1707,7 @@ mod tests {
         save_orchestration(&conn, "lead", &run).unwrap();
         // Reopening/migration must not hydrate, pause or otherwise mutate runs.
         migrate(&conn).unwrap();
-        let rows = list_by_project(&conn, "/tmp/a").unwrap();
+        let rows = list_by_project(&conn, "/tmp/a", &git_for("/tmp/a")).unwrap();
         assert_eq!(rows.len(), 2);
         let lead = rows.iter().find(|row| row.id == "lead").unwrap();
         let summary = lead.orchestration.as_ref().unwrap();
@@ -1710,7 +1720,12 @@ mod tests {
         assert!(has_user_block(&worker.blocks));
         // A later run replaces the card's agents without resurfacing old chats.
         save_orchestration(&conn, "lead", &json!({"status": "active", "tasks": []})).unwrap();
-        assert_eq!(list_by_project(&conn, "/tmp/a").unwrap().len(), 2);
+        assert_eq!(
+            list_by_project(&conn, "/tmp/a", &git_for("/tmp/a"))
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -1723,12 +1738,16 @@ mod tests {
         worker.linked_work_item = Some(json!({"kind": "pr", "number": 1}));
         let summary = upsert_session(&conn, &worker).unwrap();
         assert_eq!(summary.orchestration_lead_id.as_deref(), Some("lead"));
-        assert!(list_by_project(&conn, "/tmp/a").unwrap().is_empty());
+        assert!(list_by_project(&conn, "/tmp/a", &git_for("/tmp/a"))
+            .unwrap()
+            .is_empty());
         assert!(list_linked(&conn).unwrap().is_empty());
         // An older renderer's next write cannot accidentally detach a worker.
         worker.blocks = json!([{"id": "u", "role": "user", "text": "Task"}]);
         upsert_session(&conn, &worker).unwrap();
-        assert!(list_by_project(&conn, "/tmp/a").unwrap().is_empty());
+        assert!(list_by_project(&conn, "/tmp/a", &git_for("/tmp/a"))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1750,7 +1769,7 @@ mod tests {
         conn.execute_batch("DROP TABLE orchestration_sidebar; DROP TABLE orchestration_workers;")
             .unwrap();
         migrate(&conn).unwrap();
-        let rows = list_by_project(&conn, "/tmp/a").unwrap();
+        let rows = list_by_project(&conn, "/tmp/a", &git_for("/tmp/a")).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, "lead");
         assert_eq!(
@@ -1821,7 +1840,9 @@ mod tests {
         let mut quiet = sample("s1", "/tmp/a", "Quiet");
         quiet.blocks = json!([{ "id": "b1", "role": "assistant", "text": "hi" }]);
         upsert_session(&conn, &quiet).unwrap();
-        assert!(list_by_project(&conn, "/tmp/a").unwrap().is_empty());
+        assert!(list_by_project(&conn, "/tmp/a", &git_for("/tmp/a"))
+            .unwrap()
+            .is_empty());
 
         // The flag has to follow the transcript, not just the first write.
         quiet.blocks = json!([
@@ -1829,7 +1850,12 @@ mod tests {
             { "id": "b2", "role": "user", "text": "hello" }
         ]);
         upsert_session(&conn, &quiet).unwrap();
-        assert_eq!(list_by_project(&conn, "/tmp/a").unwrap().len(), 1);
+        assert_eq!(
+            list_by_project(&conn, "/tmp/a", &git_for("/tmp/a"))
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -1841,12 +1867,12 @@ mod tests {
 
         let saved = upsert_session(&conn, &session).unwrap();
         assert!(saved.draft);
-        assert!(list_by_project(&conn, "/tmp/a").unwrap()[0].draft);
+        assert!(list_by_project(&conn, "/tmp/a", &git_for("/tmp/a")).unwrap()[0].draft);
 
         session.blocks = json!([{ "id": "b1", "role": "user", "text": "hello" }]);
         let sent = upsert_session(&conn, &session).unwrap();
         assert!(!sent.draft);
-        assert!(!list_by_project(&conn, "/tmp/a").unwrap()[0].draft);
+        assert!(!list_by_project(&conn, "/tmp/a", &git_for("/tmp/a")).unwrap()[0].draft);
     }
 
     #[test]
@@ -1925,7 +1951,7 @@ mod tests {
 
         let summary = upsert_session(&conn, &row).unwrap();
         assert_eq!(summary.linked_work_item, row.linked_work_item);
-        let listed = list_by_project(&conn, "/tmp/a").unwrap();
+        let listed = list_by_project(&conn, "/tmp/a", &git_for("/tmp/a")).unwrap();
         assert_eq!(listed[0].linked_work_item, row.linked_work_item);
         let stored = get_session(&conn, "s1").unwrap().unwrap();
         assert_eq!(stored.linked_work_item, row.linked_work_item);
@@ -2017,7 +2043,7 @@ mod tests {
         let summary = upsert_session(&conn, &session).unwrap();
         assert_eq!(summary.additions, 0);
         assert_eq!(summary.deletions, 0);
-        let listed = list_by_project(&conn, "/tmp/a").unwrap();
+        let listed = list_by_project(&conn, "/tmp/a", &git_for("/tmp/a")).unwrap();
         assert_eq!(listed[0].additions, 0);
         assert_eq!(listed[0].deletions, 0);
     }
@@ -2033,7 +2059,7 @@ mod tests {
         let mut empty = sample("s4", "/tmp/a", "Empty");
         empty.blocks = json!([]);
         upsert_session(&conn, &empty).unwrap();
-        let listed = list_by_project(&conn, "/tmp/a").unwrap();
+        let listed = list_by_project(&conn, "/tmp/a", &git_for("/tmp/a")).unwrap();
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0].id, "s2");
         assert_eq!(listed[1].id, "s1");
@@ -2046,7 +2072,9 @@ mod tests {
         upsert_session(&conn, &sample("s1", "/tmp/a", "First")).unwrap();
         delete_session(&conn, "s1").unwrap();
         assert!(get_session(&conn, "s1").unwrap().is_none());
-        assert!(list_by_project(&conn, "/tmp/a").unwrap().is_empty());
+        assert!(list_by_project(&conn, "/tmp/a", &git_for("/tmp/a"))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -2077,7 +2105,7 @@ mod tests {
             assert!(worker.orchestration_lead_id.is_none());
             assert!(worker.blocks[0].get("orchestrationLeadId").is_none());
             assert_eq!(worker.blocks[0]["text"], "Keep this transcript");
-            assert!(list_by_project(&conn, "/tmp/a")
+            assert!(list_by_project(&conn, "/tmp/a", &git_for("/tmp/a"))
                 .unwrap()
                 .iter()
                 .any(|row| row.id == id));
@@ -2235,7 +2263,7 @@ mod tests {
         let summary = upsert_session(&conn, &session).unwrap();
         assert!(summary.worktree_removed);
         assert!(summary.branch.is_none());
-        let listed = list_by_project(&conn, "/tmp/a").unwrap();
+        let listed = list_by_project(&conn, "/tmp/a", &git_for("/tmp/a")).unwrap();
         assert!(listed[0].worktree_removed);
         assert!(listed[0].branch.is_none());
         let restored = get_session(&conn, "s1").unwrap().unwrap();
@@ -2256,7 +2284,7 @@ mod tests {
         let conn = store.conn.lock().unwrap();
         upsert_session(&conn, &sample("s1", "/tmp/a", "First")).unwrap();
         set_archived(&conn, "s1", true).unwrap();
-        let listed = list_by_project(&conn, "/tmp/a").unwrap();
+        let listed = list_by_project(&conn, "/tmp/a", &git_for("/tmp/a")).unwrap();
         assert!(listed[0].archived);
         let mut next = sample("s1", "/tmp/a", "Updated");
         next.blocks = json!([
@@ -2267,7 +2295,7 @@ mod tests {
         assert!(summary.archived);
         assert_eq!(summary.title, "Updated");
         set_archived(&conn, "s1", false).unwrap();
-        let listed = list_by_project(&conn, "/tmp/a").unwrap();
+        let listed = list_by_project(&conn, "/tmp/a", &git_for("/tmp/a")).unwrap();
         assert!(!listed[0].archived);
     }
 
@@ -2299,7 +2327,7 @@ mod tests {
         let conn = store.conn.lock().unwrap();
         upsert_session(&conn, &sample("s1", "/tmp/a", "First")).unwrap();
         set_pinned(&conn, "s1", true).unwrap();
-        let listed = list_by_project(&conn, "/tmp/a").unwrap();
+        let listed = list_by_project(&conn, "/tmp/a", &git_for("/tmp/a")).unwrap();
         assert!(listed[0].pinned);
         let mut next = sample("s1", "/tmp/a", "Updated");
         next.blocks = json!([
@@ -2310,7 +2338,7 @@ mod tests {
         assert!(summary.pinned);
         assert_eq!(summary.title, "Updated");
         set_pinned(&conn, "s1", false).unwrap();
-        let listed = list_by_project(&conn, "/tmp/a").unwrap();
+        let listed = list_by_project(&conn, "/tmp/a", &git_for("/tmp/a")).unwrap();
         assert!(!listed[0].pinned);
     }
 
@@ -2397,7 +2425,7 @@ mod tests {
         let record = get_session(&conn, "s1").unwrap().unwrap();
         assert_eq!(record.branch.as_deref(), Some("feat/picker"));
         assert_eq!(record.worktree_cwd.as_deref(), Some("/tmp/a-feat"));
-        let listed = list_by_project(&conn, "/tmp/a").unwrap();
+        let listed = list_by_project(&conn, "/tmp/a", &git_for("/tmp/a")).unwrap();
         assert_eq!(listed[0].branch.as_deref(), Some("feat/picker"));
         assert_eq!(listed[0].worktree_cwd.as_deref(), Some("/tmp/a-feat"));
     }

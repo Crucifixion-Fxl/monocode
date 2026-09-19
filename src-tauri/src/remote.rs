@@ -354,30 +354,30 @@ pub(crate) fn capture_timeout(
     let mut err = Vec::new();
     let mut code = None;
     let deadline = Instant::now() + timeout;
-    loop {
+    // `child.wait()` can observe the exit before the pipe readers have
+    // finished draining, so `Exit` alone never ends the wait: the channel
+    // disconnects only when every sender (stdout, stderr, waiter) is done.
+    let timed_out = loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let msg = if remaining.is_zero() {
-            // Kill and keep draining so the reader threads finish.
-            crate::harness::terminate(pid);
-            rx.recv()
-                .map_err(|_| format!("{program} produced no output after timeout"))?
-        } else {
-            match rx.recv_timeout(remaining) {
-                Ok(msg) => msg,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    crate::harness::terminate(pid);
-                    rx.recv()
-                        .map_err(|_| format!("{program} produced no output after timeout"))?
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        };
-        match msg {
-            CaptureMsg::Out(buf) => out = buf,
-            CaptureMsg::Err(buf) => err = buf,
-            CaptureMsg::Exit(status) => {
-                code = status;
-                break;
+        if remaining.is_zero() {
+            break true;
+        }
+        match rx.recv_timeout(remaining) {
+            Ok(CaptureMsg::Out(buf)) => out = buf,
+            Ok(CaptureMsg::Err(buf)) => err = buf,
+            Ok(CaptureMsg::Exit(status)) => code = status,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break true,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break false,
+        }
+    };
+    if timed_out {
+        // Kill and keep draining so the reader threads finish.
+        crate::harness::terminate(pid);
+        for msg in rx.iter() {
+            match msg {
+                CaptureMsg::Out(buf) => out = buf,
+                CaptureMsg::Err(buf) => err = buf,
+                CaptureMsg::Exit(status) => code = status,
             }
         }
     }
@@ -679,6 +679,11 @@ pub(crate) fn invalidate_connection(connection_id: &str) {
     if let Ok(mut map) = agent_resolutions().lock() {
         map.retain(|(conn, _), _| conn != connection_id);
     }
+    // The persistent channel was spawned with the previous profile; drop it
+    // so the next op reconnects with the current settings.
+    if let Ok(mut map) = channels().lock() {
+        map.remove(connection_id);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -691,7 +696,7 @@ pub(crate) fn invalidate_connection(connection_id: &str) {
 // `git check-ignore` hop (skipped silently outside a repo).
 // ---------------------------------------------------------------------------
 
-const HELPER_VERSION: u8 = 2;
+const HELPER_VERSION: u8 = 3;
 
 const HELPER_SCRIPT: &str = r#"#!/bin/sh
 # MonoCode remote file helper. Output lines are hex-encoded so names with
@@ -774,12 +779,30 @@ case "$op" in
       fail write "cannot replace $dest"
     fi
     ;;
+  create)
+    # Atomic no-clobber empty-file create: `set -C` makes the redirection
+    # fail when the target exists, so a new file never replaces anything.
+    [ $# -ge 1 ] || fail create "missing path"
+    dir=$(dirname "$1")
+    [ -d "$dir" ] || fail create "no such directory: $dir"
+    if ( set -C; : > "$1" ) 2>/dev/null; then
+      :
+    elif [ -e "$1" ]; then
+      fail create "already exists: $1"
+    else
+      fail create "cannot create $1"
+    fi
+    ;;
   mkdir)
+    # Creating an existing path is "already exists", not success — the local
+    # create contract reports the collision instead of adopting the dir.
     [ $# -ge 1 ] || fail mkdir "missing path"
+    [ -e "$1" ] && fail mkdir "already exists: $1"
     mkdir -p "$1" || fail mkdir "cannot create $1"
     ;;
   rename)
     [ $# -ge 2 ] || fail rename "missing paths"
+    [ -e "$2" ] && fail rename "already exists: $2"
     mv -f "$1" "$2" || fail rename "cannot rename $1"
     ;;
   delete)
@@ -795,6 +818,7 @@ case "$op" in
   move)
     [ $# -ge 2 ] || fail move "missing paths"
     [ -e "$1" ] || fail move "no such path: $1"
+    [ -e "$2" ] && fail move "already exists: $2"
     mv -f "$1" "$2" || fail move "cannot move $1"
     ;;
   find)
@@ -1261,6 +1285,12 @@ fn remote_mutation(remote: &RemoteRef, op: &str, args: &[&str]) -> Result<(), St
 
 pub(crate) fn remote_create_dir(remote: &RemoteRef) -> Result<(), String> {
     remote_mutation(remote, "mkdir", &[&remote.path])
+}
+
+/// Atomic no-clobber empty-file create, for "new file" — unlike
+/// [`remote_write`], an existing file is never replaced.
+pub(crate) fn remote_create_file(remote: &RemoteRef) -> Result<(), String> {
+    remote_mutation(remote, "create", &[&remote.path])
 }
 
 pub(crate) fn remote_rename(remote: &RemoteRef, dest: &RemoteRef) -> Result<(), String> {

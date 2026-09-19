@@ -311,6 +311,7 @@ export function ModelPicker({
   const pickerHarnesses = useMemo(() => {
     void availabilityVersion;
     void visibilityVersion;
+    void remoteAvailabilityVersion;
     return HARNESSES.filter((id) =>
       showProviderInModelPicker(
         id,
@@ -318,7 +319,7 @@ export function ModelPicker({
         hasProbedHarnessAvailability(),
       ),
     );
-  }, [availabilityVersion, visibilityVersion]);
+  }, [available, availabilityVersion, visibilityVersion, remoteAvailabilityVersion]);
   const providerKey = pickerHarnesses.join(",");
   const visibleTab = coerceModelPickerTab(tab, (id) =>
     pickerHarnesses.includes(id),
