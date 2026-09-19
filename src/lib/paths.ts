@@ -1,3 +1,5 @@
+import { isRemotePath, parseRemotePath, remoteConnectionLabel } from "./remote";
+
 import { IS_WIN } from "./platform";
 
 function windowsPath(path: string): boolean {
@@ -24,6 +26,18 @@ export function pathKey(path: string): string {
 export function prettyCwd(cwd: string): string {
   const trimmed = trimSlash(cwd);
   if (trimmed === "~") return "~";
+
+  if (isRemotePath(trimmed)) {
+    // `ssh://<id>/home/u/app` → `Server Name:~/app`
+    const parsed = parseRemotePath(trimmed);
+    if (!parsed) return trimmed;
+    const parts = parsed.path.split("/").filter(Boolean);
+    if (parts.length >= 2 && (parts[0] === "Users" || parts[0] === "home")) {
+      const rest = parts.slice(2).join("/");
+      return `${remoteConnectionLabel(trimmed)}:~${rest ? `/${rest}` : ""}`;
+    }
+    return `${remoteConnectionLabel(trimmed)}:${parsed.path}`;
+  }
 
   const parts = trimmed.split("/").filter(Boolean);
   if (parts.length >= 2 && (parts[0] === "Users" || parts[0] === "home")) {

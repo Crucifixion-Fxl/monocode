@@ -194,8 +194,19 @@ pub fn session_upsert(
         return Err("blocks must be an array".into());
     }
 
+    // Git discovery may run SSH for a remote checkout. Do it before taking
+    // the shared SQLite mutex so a slow remote probe cannot block every
+    // other command, including the main window's boot query.
+    let git_root = crate::fs::expand_home(
+        session
+            .worktree_cwd
+            .as_deref()
+            .filter(|cwd| !cwd.is_empty())
+            .unwrap_or(&session.cwd),
+    );
+    let git = crate::fs::git_info_for(&git_root);
     let conn = store.conn.lock().map_err(|_| "Session store is locked")?;
-    upsert_session(&conn, &session).map_err(|e| e.to_string())
+    upsert_session_with_git(&conn, &session, git).map_err(|e| e.to_string())
 }
 
 #[tauri::command(async)]
@@ -783,7 +794,24 @@ fn orchestration_summary(conn: &Connection, id: &str) -> rusqlite::Result<Option
     ))
 }
 
+#[cfg(test)]
 fn upsert_session(conn: &Connection, session: &SessionUpsert) -> rusqlite::Result<SessionSummary> {
+    let git_root = crate::fs::expand_home(
+        session
+            .worktree_cwd
+            .as_deref()
+            .filter(|cwd| !cwd.is_empty())
+            .unwrap_or(&session.cwd),
+    );
+    let git = crate::fs::git_info_for(&git_root);
+    upsert_session_with_git(conn, session, git)
+}
+
+fn upsert_session_with_git(
+    conn: &Connection,
+    session: &SessionUpsert,
+    git: crate::fs::GitInfo,
+) -> rusqlite::Result<SessionSummary> {
     let now = now_millis();
     let model_settings = serde_json::to_string(&session.model_settings)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
@@ -805,13 +833,6 @@ fn upsert_session(conn: &Connection, session: &SessionUpsert) -> rusqlite::Resul
         .as_ref()
         .map(|value| value.trim())
         .filter(|value| !value.is_empty());
-    let git = crate::fs::git_info_for(&crate::fs::expand_home(
-        session
-            .worktree_cwd
-            .as_deref()
-            .filter(|cwd| !cwd.is_empty())
-            .unwrap_or(&session.cwd),
-    ));
     let branch = if session.worktree_removed {
         None
     } else {
