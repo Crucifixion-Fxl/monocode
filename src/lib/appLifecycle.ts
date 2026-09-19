@@ -193,7 +193,15 @@ export async function askQuitConfirmation(
 }
 
 export async function commitQuit(id: number): Promise<void> {
-  const persisted = await handleQuitRequested();
+  // A rejected save must still report ready with persisted=false — the
+  // coordinator decides what to do with that; staying silent would stall a
+  // quit it has already confirmed.
+  let persisted = false;
+  try {
+    persisted = await handleQuitRequested();
+  } catch {
+    persisted = false;
+  }
   await invoke("quit_ready", { id, persisted }).catch(() => undefined);
 }
 
